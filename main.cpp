@@ -18,6 +18,7 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -29,6 +30,7 @@
 #include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QPixmap>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
@@ -806,6 +808,7 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow() {
         setWindowTitle("Archivist");
+        setWindowIcon(QIcon(":/archivist.png"));
         resize(900, 600);
         auto *bar = addToolBar("Archive");
         bar->setMovable(false);
@@ -883,6 +886,10 @@ private:
         auto *layout = new QVBoxLayout(&dialog);
         layout->setContentsMargins(20, 20, 20, 20);
         layout->setSpacing(10);
+
+        auto *aboutIcon = new QLabel;
+        aboutIcon->setPixmap(QPixmap(":/archivist.png").scaled(72, 72, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        layout->addWidget(aboutIcon);
 
         auto *heading = new QLabel("Archivist " + qApp->applicationVersion());
         QFont font = heading->font();
@@ -1078,6 +1085,7 @@ int main(int argc, char **argv) {
     app.setOrganizationName("Archivist");
     app.setApplicationName("Archivist");
     app.setApplicationVersion(ARCHIVIST_VERSION);
+    app.setWindowIcon(QIcon(":/archivist.png"));
     QSettings legacySettings("Archway", "Archway");
     QSettings settings;
     legacySettings.beginGroup("compression");

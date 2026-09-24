@@ -1,4 +1,4 @@
-# Archivist
+# <img src="archivist.png" width="48" height="48" alt=""> Archivist
 
 Archivist is a lightweight archive manager for Omarchy. It follows your current theme and gives you a simple place to open, extract, and edit archives.
 
