@@ -10,14 +10,14 @@ optdepends=('qt6-wayland: native Wayland support' 'omarchy: automatic theme inte
 makedepends=('cmake' 'ninja' 'gcc' 'pkgconf')
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('54e439b870727aa37ebdaa8b06ca7fdf0f5c97c4371cf7ccfb77a17f926e6469')
 
 build() {
-  cmake -S "$srcdir/$pkgname-$pkgver" -B build -G Ninja \
+  cmake -S "$srcdir/$pkgname-$pkgver" -B "$srcdir/build-$pkgver" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
-  cmake --build build
+  cmake --build "$srcdir/build-$pkgver"
 }
 
 package() {
-  DESTDIR="$pkgdir" cmake --install build
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build-$pkgver"
 }
