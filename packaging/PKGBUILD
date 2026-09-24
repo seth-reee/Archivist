@@ -1,0 +1,23 @@
+pkgname=archivist
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Lightweight Qt archive manager for Omarchy'
+arch=('x86_64')
+url='https://github.com/seth-reee/archivist'
+license=('MIT')
+depends=('qt6-base' 'libarchive' 'gcc-libs' 'glibc')
+optdepends=('qt6-wayland: native Wayland support' 'omarchy: automatic theme integration' 'rar: create and edit RAR archives')
+makedepends=('cmake' 'ninja' 'gcc' 'pkgconf')
+options=('!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cmake -S "$srcdir/$pkgname-$pkgver" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Archivist
+Comment=Open, extract, and edit archives
+Exec=archivist %F
+Icon=package-x-generic
+Terminal=false
+Categories=Utility;Archiving;
+MimeType=application/zip;application/x-tar;application/gzip;application/x-bzip2;application/x-xz;application/zstd;application/x-7z-compressed;application/vnd.rar;
