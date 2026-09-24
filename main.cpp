@@ -775,33 +775,62 @@ QString themeFile() {
 }
 
 void applyOmarchyPalette(QApplication &app) {
+    QHash<QString, QColor> colors{
+        {"background", QColor("#121212")},
+        {"dark_background", QColor("#121212")},
+        {"lighter_background", QColor("#1e1e1e")},
+        {"foreground", QColor("#bebebe")},
+        {"light_foreground", QColor("#8a8a8d")},
+        {"dark_foreground", QColor("#555555")},
+        {"accent", QColor("#e68e0d")},
+        {"selection", QColor("#333333")},
+        {"muted", QColor("#333333")}
+    };
     QFile file(themeFile());
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return;
-    QHash<QString, QColor> colors;
     const QRegularExpression line(R"theme(^\s*([A-Za-z_]+)\s*=\s*"(#[0-9A-Fa-f]{6})")theme");
-    while (!file.atEnd()) {
-        const auto match = line.match(QString::fromUtf8(file.readLine()));
-        if (match.hasMatch()) colors.insert(match.captured(1), QColor(match.captured(2)));
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!file.atEnd()) {
+            const auto match = line.match(QString::fromUtf8(file.readLine()));
+            if (match.hasMatch()) colors.insert(match.captured(1), QColor(match.captured(2)));
+        }
     }
     auto color = [&](const QString &key, QColor fallback) { return colors.value(key, fallback); };
-    const QColor bg = color("background", QColor("#202020"));
+    const QColor bg = color("background", QColor("#121212"));
     const QColor panel = color("lighter_background", bg.lighter(115));
-    const QColor fg = color("foreground", Qt::white);
-    const QColor accent = color("accent", QColor("#5e9cff"));
+    const QColor fg = color("foreground", QColor("#bebebe"));
+    const QColor accent = color("accent", QColor("#e68e0d"));
+    const QColor selection = color("selection", QColor("#333333"));
+    const QColor muted = color("muted", QColor("#333333"));
+    const QColor disabled = color("dark_foreground", QColor("#555555"));
     QPalette palette = app.palette();
     palette.setColor(QPalette::Window, bg);
     palette.setColor(QPalette::WindowText, fg);
-    palette.setColor(QPalette::Base, color("dark_background", bg));
+    palette.setColor(QPalette::Base, panel);
     palette.setColor(QPalette::AlternateBase, panel);
     palette.setColor(QPalette::Text, fg);
     palette.setColor(QPalette::Button, panel);
     palette.setColor(QPalette::ButtonText, fg);
-    palette.setColor(QPalette::Highlight, accent);
-    palette.setColor(QPalette::HighlightedText, QColor("#101010"));
+    palette.setColor(QPalette::Highlight, selection);
+    palette.setColor(QPalette::HighlightedText, fg);
     palette.setColor(QPalette::ToolTipBase, panel);
     palette.setColor(QPalette::ToolTipText, fg);
     palette.setColor(QPalette::PlaceholderText, color("light_foreground", fg.darker(120)));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, disabled);
+    palette.setColor(QPalette::Disabled, QPalette::Text, disabled);
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, disabled);
     app.setPalette(palette);
+    app.setStyleSheet(QString(
+        "QWidget { font-size: 13px; } "
+        "QPushButton, QToolButton, QLineEdit, QComboBox, QSpinBox { padding: 7px 10px; border: 1px solid %1; border-radius: 6px; } "
+        "QPushButton:hover, QToolButton:hover { border-color: %2; } "
+        "QPushButton:disabled, QToolButton:disabled { color: %3; } "
+        "QToolBar { spacing: 4px; border: none; } "
+        "QTableWidget { border: 1px solid %1; border-radius: 6px; gridline-color: %1; } "
+        "QHeaderView::section { background: %4; padding: 8px; border: none; border-bottom: 1px solid %1; } "
+        "QTableWidget::item { padding: 5px; } QTableWidget::item:selected { background: %5; } "
+        "QMenu { border: 1px solid %1; padding: 4px; } "
+        "QMenu::item { padding: 6px 24px 6px 10px; } QMenu::item:selected { background: %5; }")
+        .arg(muted.name(), accent.name(), disabled.name(), panel.name(), selection.name()));
 }
 
 class MainWindow : public QMainWindow {
@@ -810,7 +839,25 @@ public:
         setWindowTitle("Archivist");
         setWindowIcon(QIcon(":/archivist.png"));
         resize(900, 600);
-        auto *bar = addToolBar("Archive");
+        auto *container = new QWidget;
+        auto *layout = new QVBoxLayout(container);
+        layout->setContentsMargins(20, 20, 20, 12);
+        layout->setSpacing(12);
+        auto *titleRow = new QHBoxLayout;
+        auto *titleIcon = new QLabel;
+        titleIcon->setPixmap(QPixmap(":/archivist.png").scaled(42, 42, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        auto *title = new QLabel("Archivist");
+        QFont titleFont = title->font();
+        titleFont.setBold(true);
+        title->setFont(titleFont);
+        auto *about = new QPushButton("About");
+        titleRow->addWidget(titleIcon);
+        titleRow->addWidget(title);
+        titleRow->addStretch();
+        titleRow->addWidget(about);
+        layout->addLayout(titleRow);
+
+        auto *bar = new QToolBar("Archive", container);
         bar->setMovable(false);
         auto *newAction = bar->addAction("New archive");
         auto *openAction = bar->addAction("Open");
@@ -819,15 +866,9 @@ public:
         addAction_ = bar->addAction("Add files");
         renameAction_ = bar->addAction("Rename");
         deleteAction_ = bar->addAction("Delete");
-        auto *toolbarSpacer = new QWidget;
-        toolbarSpacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        bar->addWidget(toolbarSpacer);
-        auto *aboutAction = bar->addAction("About");
-        auto *container = new QWidget;
-        auto *layout = new QVBoxLayout(container);
         heading_ = new QLabel("Create or open an archive to get started");
-        heading_->setContentsMargins(4, 6, 4, 6);
         layout->addWidget(heading_);
+        layout->addWidget(bar);
         table_ = new QTableWidget;
         table_->setColumnCount(4);
         table_->setHorizontalHeaderLabels({"Name", "Size", "Modified", "Type"});
@@ -848,7 +889,7 @@ public:
         connect(addAction_, &QAction::triggered, this, [this] { addFiles(); });
         connect(renameAction_, &QAction::triggered, this, [this] { renameEntry(); });
         connect(deleteAction_, &QAction::triggered, this, [this] { deleteEntries(); });
-        connect(aboutAction, &QAction::triggered, this, [this] { showAbout(); });
+        connect(about, &QPushButton::clicked, this, [this] { showAbout(); });
         connect(table_, &QTableWidget::itemSelectionChanged, this, [this] { updateActions(); });
         updateActions();
     }
