@@ -11,11 +11,15 @@ Archivist is a lightweight archive manager for Omarchy. It follows your current 
 
 ## Install
 
-Download the latest Arch package from [Releases](https://github.com/seth-reee/archivist/releases), then install it from your Downloads folder:
+Download the latest Omarchy package from [Releases](https://github.com/seth-reee/archivist/releases), then install it from your Downloads folder:
 
 ```bash
 sudo pacman -U ./archivist-*.pkg.tar.zst
 ```
+
+The package recipe supports Omarchy on x86_64 and ARM64, using Arch Linux and Arch Linux ARM respectively. Install the package whose filename matches your machine's architecture. To build from the tagged release, install `base-devel`, `cmake`, `ninja`, `qt6-base`, `libarchive`, and `pkgconf`, then run `makepkg -s` in `packaging/`.
+
+**ARM64 status:** The ARM64 package built and launched headlessly under QEMU, but remains untested on a real ARM64 Omarchy desktop.
 
 Open **Archivist** from the application menu.
 
