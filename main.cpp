@@ -1,6 +1,7 @@
 #include <archive.h>
 #include <archive_entry.h>
 
+#include <QAbstractTableModel>
 #include <QAction>
 #include <QApplication>
 #include <QComboBox>
@@ -20,6 +21,7 @@
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -36,10 +38,11 @@
 #include <QSettings>
 #include <QSet>
 #include <QSizePolicy>
+#include <QSortFilterProxyModel>
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QStatusBar>
-#include <QTableWidget>
+#include <QTableView>
 #include <QTextBrowser>
 #include <QTimer>
 #include <QTemporaryDir>
@@ -48,6 +51,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <utility>
 
 namespace {
 
@@ -57,6 +61,60 @@ struct Entry {
     QDateTime modified;
     bool directory = false;
     bool regular = false;
+};
+
+class ArchiveTableModel : public QAbstractTableModel {
+public:
+    explicit ArchiveTableModel(QObject *parent = nullptr) : QAbstractTableModel(parent) {}
+
+    const QList<Entry> &entries() const { return entries_; }
+
+    void setEntries(QList<Entry> entries) {
+        beginResetModel();
+        entries_ = std::move(entries);
+        endResetModel();
+    }
+
+    int rowCount(const QModelIndex &parent = {}) const override {
+        return parent.isValid() ? 0 : entries_.size();
+    }
+
+    int columnCount(const QModelIndex &parent = {}) const override {
+        return parent.isValid() ? 0 : 4;
+    }
+
+    QVariant data(const QModelIndex &index, int role) const override {
+        if (!index.isValid() || index.row() >= entries_.size()) return {};
+        if (role == Qt::TextAlignmentRole && index.column() == 1)
+            return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
+        const Entry &entry = entries_.at(index.row());
+        if (role == Qt::UserRole) {
+            switch (index.column()) {
+            case 0: return entry.path;
+            case 1: return entry.directory ? QVariant() : QVariant(entry.size);
+            case 2: return entry.modified;
+            case 3: return entry.directory ? QString("Folder") : entry.regular ? QString("File") : QString("Link / other");
+            default: return {};
+            }
+        }
+        if (role != Qt::DisplayRole) return {};
+        switch (index.column()) {
+        case 0: return entry.path;
+        case 1: return entry.directory ? QString() : QLocale().formattedDataSize(entry.size);
+        case 2: return QLocale().toString(entry.modified, QLocale::ShortFormat);
+        case 3: return entry.directory ? QString("Folder") : entry.regular ? QString("File") : QString("Link / other");
+        default: return {};
+        }
+    }
+
+    QVariant headerData(int section, Qt::Orientation orientation, int role) const override {
+        if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return {};
+        static const QStringList headers = {"Name", "Size", "Modified", "Type"};
+        return section >= 0 && section < headers.size() ? QVariant(headers.at(section)) : QVariant();
+    }
+
+private:
+    QList<Entry> entries_;
 };
 
 using ProgressCallback = std::function<bool(qint64, const QString &)>;
@@ -185,7 +243,7 @@ bool listArchive(const QString &path, QList<Entry> *entries, QString *error) {
         item.modified = QDateTime::fromSecsSinceEpoch(archive_entry_mtime(raw));
         item.directory = archive_entry_filetype(raw) == AE_IFDIR;
         item.regular = archive_entry_filetype(raw) == AE_IFREG;
-        entries->append(item);
+        if (!item.path.isEmpty() && item.path != ".") entries->append(item);
         archive_read_data_skip(reader);
     }
     const bool ok = result == ARCHIVE_EOF;
@@ -869,17 +927,24 @@ public:
         heading_ = new QLabel("Create or open an archive to get started");
         layout->addWidget(heading_);
         layout->addWidget(bar);
-        table_ = new QTableWidget;
-        table_->setColumnCount(4);
-        table_->setHorizontalHeaderLabels({"Name", "Size", "Modified", "Type"});
+        table_ = new QTableView;
+        model_ = new ArchiveTableModel(table_);
+        sortModel_ = new QSortFilterProxyModel(table_);
+        sortModel_->setSourceModel(model_);
+        sortModel_->setSortRole(Qt::UserRole);
+        sortModel_->setSortCaseSensitivity(Qt::CaseInsensitive);
+        sortModel_->setDynamicSortFilter(true);
+        table_->setModel(sortModel_);
         table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-        table_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-        table_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-        table_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+        table_->verticalHeader()->hide();
+        table_->horizontalHeader()->resizeSection(1, 110);
+        table_->horizontalHeader()->resizeSection(2, 180);
+        table_->horizontalHeader()->resizeSection(3, 95);
         table_->setSelectionBehavior(QAbstractItemView::SelectRows);
         table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
         table_->setAlternatingRowColors(true);
+        table_->setSortingEnabled(true);
         layout->addWidget(table_);
         setCentralWidget(container);
         statusBar()->showMessage("Ready");
@@ -890,7 +955,8 @@ public:
         connect(renameAction_, &QAction::triggered, this, [this] { renameEntry(); });
         connect(deleteAction_, &QAction::triggered, this, [this] { deleteEntries(); });
         connect(about, &QPushButton::clicked, this, [this] { showAbout(); });
-        connect(table_, &QTableWidget::itemSelectionChanged, this, [this] { updateActions(); });
+        connect(table_->selectionModel(), &QItemSelectionModel::selectionChanged,
+                this, [this] { updateActions(); });
         updateActions();
     }
 
@@ -899,23 +965,11 @@ public:
         QString error;
         if (!listArchive(path, &next, &error)) { QMessageBox::critical(this, "Cannot open archive", error); return; }
         archivePath_ = QFileInfo(path).absoluteFilePath();
-        entries_ = next;
-        table_->setRowCount(entries_.size());
-        for (int row = 0; row < entries_.size(); ++row) {
-            const Entry &e = entries_.at(row);
-            auto *name = new QTableWidgetItem(e.path);
-            name->setData(Qt::UserRole, e.path);
-            table_->setItem(row, 0, name);
-            auto *size = new QTableWidgetItem(e.directory ? "" : QLocale().formattedDataSize(e.size));
-            size->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-            table_->setItem(row, 1, size);
-            table_->setItem(row, 2, new QTableWidgetItem(QLocale().toString(e.modified, QLocale::ShortFormat)));
-            table_->setItem(row, 3, new QTableWidgetItem(e.directory ? "Folder" : e.regular ? "File" : "Link / other"));
-        }
+        model_->setEntries(std::move(next));
         heading_->setText(QFileInfo(archivePath_).fileName());
         setWindowTitle(QFileInfo(archivePath_).fileName() + " — Archivist");
         const QString mode = editableFormat(writeFormat(archivePath_)) ? "Editing available" : "View and extract";
-        statusBar()->showMessage(QString("%1 entries · %2").arg(entries_.size()).arg(mode));
+        statusBar()->showMessage(QString("%1 entries · %2").arg(model_->entries().size()).arg(mode));
         updateActions();
     }
 
@@ -999,13 +1053,17 @@ private:
     QSet<QString> selectedPaths() const {
         QSet<QString> result;
         for (const QModelIndex &index : table_->selectionModel()->selectedRows())
-            result.insert(table_->item(index.row(), 0)->data(Qt::UserRole).toString());
+            result.insert(entryAt(index).path);
         return result;
+    }
+
+    const Entry &entryAt(const QModelIndex &viewIndex) const {
+        return model_->entries().at(sortModel_->mapToSource(viewIndex).row());
     }
 
     qint64 extractionTotal(const QSet<QString> &selected) const {
         qint64 total = 0;
-        for (const Entry &entry : entries_) {
+        for (const Entry &entry : model_->entries()) {
             if (!entry.regular || !safeEntryPath(entry.path)) continue;
             bool wanted = selected.isEmpty() || selected.contains(entry.path);
             if (!wanted) for (const QString &folder : selected) {
@@ -1019,7 +1077,7 @@ private:
     bool performEdit(const QSet<QString> &removed, const QHash<QString, QString> &renamed,
                      const QStringList &added, const QString &title) {
         qint64 total = 0;
-        for (const Entry &entry : entries_) {
+        for (const Entry &entry : model_->entries()) {
             bool discard = removed.contains(entry.path);
             if (!discard) for (const QString &folder : removed) {
                 if (entry.path.startsWith(folder + '/')) { discard = true; break; }
@@ -1033,7 +1091,7 @@ private:
         const int level = QSettings().value(compressionSettingKey(archivePath_), -1).toInt();
         const ProgressCallback callback = [&](qint64 bytes, const QString &name) { return progress.report(bytes, name); };
         const bool ok = useRar
-                            ? saveRarEdits(archivePath_, entries_, removed, renamed, added, level, &error, callback)
+                            ? saveRarEdits(archivePath_, model_->entries(), removed, renamed, added, level, &error, callback)
                             : saveEdits(archivePath_, removed, renamed, added, &error, callback, level);
         progress.finish();
         if (ok) openArchive(archivePath_);
@@ -1049,12 +1107,12 @@ private:
         const int count = selected.size();
         bool rarFolderSelected = false;
         if (format == WriteFormat::Rar) for (const QModelIndex &index : selected)
-            rarFolderSelected |= entries_.at(index.row()).directory;
+            rarFolderSelected |= entryAt(index).directory;
         extractAction_->setEnabled(!archivePath_.isEmpty());
         addAction_->setEnabled(editable);
         deleteAction_->setEnabled(editable && count > 0 && !rarFolderSelected);
         deleteAction_->setToolTip(rarFolderSelected ? "Select files individually to delete them from a RAR archive." : "");
-        renameAction_->setEnabled(editable && count == 1 && entries_.at(selected.first().row()).regular);
+        renameAction_->setEnabled(editable && count == 1 && entryAt(selected.first()).regular);
     }
 
     void extract() {
@@ -1079,7 +1137,7 @@ private:
         const QStringList paths = QFileDialog::getOpenFileNames(this, "Add files", QDir::homePath());
         if (paths.isEmpty()) return;
         QSet<QString> names;
-        for (const Entry &e : entries_) names.insert(e.path);
+        for (const Entry &e : model_->entries()) names.insert(e.path);
         for (const QString &path : paths) {
             const QString name = QFileInfo(path).fileName();
             if (names.contains(name)) { QMessageBox::warning(this, "Name already exists", name + " is already in the archive."); return; }
@@ -1096,7 +1154,7 @@ private:
             QLineEdit::Normal, oldName, &accepted).trimmed();
         if (!accepted || newName == oldName) return;
         if (!safeEntryPath(newName)) { QMessageBox::warning(this, "Invalid path", "Use a relative path without '..' or ':'."); return; }
-        for (const Entry &e : entries_) if (e.path == newName) {
+        for (const Entry &e : model_->entries()) if (e.path == newName) {
             QMessageBox::warning(this, "Name already exists", "An entry with that path already exists."); return;
         }
         performEdit({}, {{oldName, newName}}, {}, "Renaming entry");
@@ -1110,9 +1168,10 @@ private:
     }
 
     QString archivePath_;
-    QList<Entry> entries_;
     QLabel *heading_ = nullptr;
-    QTableWidget *table_ = nullptr;
+    QTableView *table_ = nullptr;
+    ArchiveTableModel *model_ = nullptr;
+    QSortFilterProxyModel *sortModel_ = nullptr;
     QAction *addAction_ = nullptr;
     QAction *extractAction_ = nullptr;
     QAction *renameAction_ = nullptr;
@@ -1122,6 +1181,8 @@ private:
 } // namespace
 
 int main(int argc, char **argv) {
+    if (qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains("Hyprland", Qt::CaseInsensitive))
+        qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
     QApplication app(argc, argv);
     app.setOrganizationName("Archivist");
     app.setApplicationName("Archivist");
