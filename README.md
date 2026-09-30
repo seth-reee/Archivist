@@ -25,7 +25,7 @@ Open **Archivist** from the application menu.
 
 ## Use
 
-Choose **New archive** to pick a name, location, format, and compression level. You can add files right away or start with an empty archive. Choose **Open** to browse an existing archive, then use **Extract** or the edit buttons in the toolbar.
+Choose **New archive** to pick a name, location, format, and compression level. Add files and folders with their separate picker buttons; both appear in the same archive, and folders include their nested contents. You can also start with an empty archive. Choose **Open** to browse an existing archive, then use **Extract** or the edit buttons in the toolbar.
 
 Archivist skips unsafe archive paths and does not overwrite existing extracted files. Password protected and split archives are not supported yet.
 

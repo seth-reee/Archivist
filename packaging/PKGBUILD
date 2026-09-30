@@ -1,6 +1,6 @@
 pkgname=archivist
-pkgver=0.1.2
-pkgrel=2
+pkgver=0.1.3
+pkgrel=1
 pkgdesc='Lightweight Qt archive manager for Omarchy'
 arch=('x86_64' 'aarch64')
 url='https://github.com/seth-reee/archivist'
@@ -10,12 +10,16 @@ optdepends=('qt6-wayland: native Wayland support' 'omarchy: automatic theme inte
 makedepends=('cmake' 'ninja' 'gcc' 'pkgconf')
 options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('c0a89c636ef4ec77e98612853b18483e44bfe55eb4523b189276431539dad6e2')
+sha256sums=('SKIP')
 
 build() {
   cmake -S "$srcdir/Archivist-$pkgver" -B "$srcdir/build-$pkgver" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
   cmake --build "$srcdir/build-$pkgver"
+}
+
+check() {
+  ctest --test-dir "$srcdir/build-$pkgver" --output-on-failure
 }
 
 package() {

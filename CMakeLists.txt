@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Archivist VERSION 0.1.2 LANGUAGES CXX)
+project(Archivist VERSION 0.1.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,6 +13,12 @@ qt_add_resources(archivist "license" PREFIX "/" FILES LICENSE)
 qt_add_resources(archivist "icon" PREFIX "/" FILES archivist.png)
 target_compile_definitions(archivist PRIVATE ARCHIVIST_VERSION="${PROJECT_VERSION}")
 target_link_libraries(archivist PRIVATE Qt6::Widgets PkgConfig::LIBARCHIVE)
+
+enable_testing()
+add_executable(archivist_tests tests.cpp)
+target_compile_definitions(archivist_tests PRIVATE ARCHIVIST_VERSION="${PROJECT_VERSION}")
+target_link_libraries(archivist_tests PRIVATE Qt6::Widgets PkgConfig::LIBARCHIVE)
+add_test(NAME archivist_tests COMMAND archivist_tests)
 
 install(TARGETS archivist RUNTIME DESTINATION bin)
 install(FILES archivist.png DESTINATION share/pixmaps)

@@ -403,30 +403,81 @@ la_ssize_t writerWrite(archive *, void *client, const void *data, size_t size) {
 }
 int writerClose(archive *, void *) { return ARCHIVE_OK; }
 
-bool appendFiles(archive *writer, const QStringList &files, QString *error,
+struct ArchiveInput {
+    QString source, name;
+    bool directory;
+};
+
+// Snapshot inputs before opening any output or creating a staging directory.
+bool collectInputs(const QStringList &paths, const QString &outputPath,
+                   QList<ArchiveInput> *inputs, QString *error,
+                   const ProgressCallback &progress) {
+    const QString output = QFileInfo(outputPath).absoluteFilePath();
+    QSet<QString> names;
+    for (const QString &path : paths) {
+        const QFileInfo root(QDir::cleanPath(QFileInfo(path).absoluteFilePath()));
+        QStringList pending{root.absoluteFilePath()};
+        while (!pending.isEmpty()) {
+            const QString source = pending.takeLast();
+            if (source == output) {
+                if (source == root.absoluteFilePath()) {
+                    *error = "An archive cannot include itself."; return false;
+                }
+                continue;
+            }
+            const QFileInfo info(source);
+            if (info.isSymLink() && source != root.absoluteFilePath()) continue;
+            if (info.isSymLink() || (!info.isFile() && !info.isDir()) || !info.isReadable()) {
+                *error = "Could not read " + source; return false;
+            }
+            const QString name = root.fileName() + source.mid(root.absoluteFilePath().size());
+            if (!safeEntryPath(name) || names.contains(name)) {
+                *error = "Unsafe or duplicate archive path: " + name; return false;
+            }
+            names.insert(name);
+            if (progress && !progress(0, "Reading " + name)) { *error = "Canceled"; return false; }
+            inputs->append({source, name, info.isDir()});
+            if (info.isDir()) {
+                const auto children = QDir(source).entryInfoList(
+                    QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot, QDir::Name);
+                for (auto it = children.crbegin(); it != children.crend(); ++it)
+                    pending.append(it->absoluteFilePath());
+            }
+        }
+    }
+    return true;
+}
+
+bool appendFiles(archive *writer, const QList<ArchiveInput> &inputs, QString *error,
                  const ProgressCallback &progress) {
     char buffer[65536];
-    for (const QString &source : files) {
-        QFile file(source);
-        QFileInfo info(file);
-        if (progress && !progress(0, info.fileName())) { *error = "Canceled"; return false; }
-        if (!info.isFile() || !file.open(QIODevice::ReadOnly)) { *error = "Could not read " + source; return false; }
+    for (const auto &input : inputs) {
+        const QFileInfo info(input.source);
+        if (info.isSymLink() || info.isDir() != input.directory ||
+            (!info.isFile() && !info.isDir())) {
+            *error = "Input changed while archiving: " + input.source; return false;
+        }
+        if (progress && !progress(0, input.name)) { *error = "Canceled"; return false; }
+        QFile file(input.source);
+        if (!input.directory && !file.open(QIODevice::ReadOnly)) {
+            *error = "Could not read " + input.source; return false;
+        }
         archive_entry *entry = archive_entry_new();
-        const QByteArray name = info.fileName().toUtf8();
-        archive_entry_set_pathname(entry, name.constData());
-        archive_entry_set_filetype(entry, AE_IFREG);
-        archive_entry_set_perm(entry, 0644);
-        archive_entry_set_size(entry, info.size());
+        const QByteArray encoded = (input.directory ? input.name + '/' : input.name).toUtf8();
+        archive_entry_set_pathname(entry, encoded.constData());
+        archive_entry_set_filetype(entry, input.directory ? AE_IFDIR : AE_IFREG);
+        archive_entry_set_perm(entry, input.directory ? 0755 : 0644);
+        archive_entry_set_size(entry, input.directory ? 0 : info.size());
         archive_entry_set_mtime(entry, info.lastModified().toSecsSinceEpoch(), 0);
         const int result = archive_write_header(writer, entry);
         archive_entry_free(entry);
         if (result != ARCHIVE_OK) { *error = archiveError(writer); return false; }
-        while (!file.atEnd()) {
+        while (!input.directory && !file.atEnd()) {
             const qint64 count = file.read(buffer, sizeof(buffer));
             if (count < 0) { *error = file.errorString(); return false; }
             if (count == 0) break;
             if (archive_write_data(writer, buffer, count) != count) { *error = archiveError(writer); return false; }
-            if (progress && !progress(count, info.fileName())) { *error = "Canceled"; return false; }
+            if (progress && !progress(count, input.name)) { *error = "Canceled"; return false; }
         }
     }
     return true;
@@ -436,6 +487,8 @@ bool createArchive(const QString &path, WriteFormat format, int level, const QSt
                    QString *error, const ProgressCallback &progress = {}) {
     if (format == WriteFormat::None || writeFormat(path) != format) { *error = "Archive format does not match its filename."; return false; }
     if (QFileInfo::exists(path) || QFileInfo(path).isSymLink()) { *error = "An archive with that name already exists."; return false; }
+    QList<ArchiveInput> inputs;
+    if (!collectInputs(files, path, &inputs, error, progress)) return false;
     QSaveFile output(path);
     if (!output.open(QIODevice::WriteOnly)) { *error = output.errorString(); return false; }
     archive *writer = archive_write_new();
@@ -447,7 +500,7 @@ bool createArchive(const QString &path, WriteFormat format, int level, const QSt
         output.cancelWriting();
         return false;
     }
-    bool ok = appendFiles(writer, files, error, progress);
+    bool ok = appendFiles(writer, inputs, error, progress);
     if (archive_write_close(writer) != ARCHIVE_OK && ok) { *error = archiveError(writer); ok = false; }
     archive_write_free(writer);
     if (!ok) { output.cancelWriting(); return false; }
@@ -463,6 +516,8 @@ bool createArchive(const QString &path, WriteFormat format, int level, const QSt
 bool saveEdits(const QString &path, const QSet<QString> &removed,
                const QHash<QString, QString> &renamed, const QStringList &added, QString *error,
                const ProgressCallback &progress = {}, int level = -1) {
+    QList<ArchiveInput> inputs;
+    if (!collectInputs(added, path, &inputs, error, progress)) return false;
     archive *reader = openReader(path, error);
     if (!reader) return false;
     QSaveFile output(path);
@@ -503,7 +558,7 @@ bool saveEdits(const QString &path, const QSet<QString> &removed,
         if (!ok) break;
     }
     if (ok && result != ARCHIVE_EOF) { *error = archiveError(reader); ok = false; }
-    if (ok) ok = appendFiles(writer, added, error, progress);
+    if (ok) ok = appendFiles(writer, inputs, error, progress);
     if (archive_write_close(writer) != ARCHIVE_OK && ok) { *error = archiveError(writer); ok = false; }
     archive_write_free(writer);
     archive_read_free(reader);
@@ -602,14 +657,21 @@ bool commitRarArchive(const QString &source, const QString &destination, bool ne
     return true;
 }
 
-bool stageRarFiles(const QStringList &files, const QString &folder, QStringList *names,
+bool stageRarFiles(const QList<ArchiveInput> &inputs, const QString &folder, QStringList *names,
                    QString *error, const ProgressCallback &progress) {
     if (!QDir().mkdir(folder)) { *error = "Could not prepare temporary files."; return false; }
-    for (const QString &source : files) {
-        const QString name = QFileInfo(source).fileName();
-        if (!rarSafeArgument(name)) { *error = "RAR cannot safely add this filename: " + name; return false; }
-        if (!copyForRar(source, folder + '/' + name, error, progress, "Preparing " + name)) return false;
-        names->append("./" + name);
+    for (const auto &input : inputs) {
+        if (!rarSafeArgument(input.name)) { *error = "RAR cannot safely add this filename: " + input.name; return false; }
+        const QFileInfo info(input.source);
+        if (info.isSymLink() || info.isDir() != input.directory || (!info.isFile() && !info.isDir())) {
+            *error = "Input changed while archiving: " + input.source; return false;
+        }
+        if (progress && !progress(0, "Preparing " + input.name)) { *error = "Canceled"; return false; }
+        const QString target = folder + '/' + input.name;
+        if (input.directory) {
+            if (!QDir().mkpath(target)) { *error = "Could not stage " + input.source; return false; }
+        } else if (!copyForRar(input.source, target, error, progress, "Preparing " + input.name)) return false;
+        if (!input.name.contains('/')) names->append("./" + input.name);
     }
     return true;
 }
@@ -620,13 +682,15 @@ bool createRarArchive(const QString &path, int level, const QStringList &files,
     if (writeFormat(path) != WriteFormat::Rar) { *error = "RAR archives need a .rar filename."; return false; }
     if (files.isEmpty()) { *error = "RAR needs at least one file when the archive is created."; return false; }
     if (QFileInfo::exists(path) || QFileInfo(path).isSymLink()) { *error = "An archive with that name already exists."; return false; }
+    QList<ArchiveInput> plannedInputs;
+    if (!collectInputs(files, path, &plannedInputs, error, progress)) return false;
     QTemporaryDir temp(QFileInfo(path).absolutePath() + "/.archivist-XXXXXX");
     if (!temp.isValid()) { *error = "Could not prepare a temporary archive."; return false; }
     QStringList names;
     const QString inputs = temp.path() + "/inputs";
-    if (!stageRarFiles(files, inputs, &names, error, progress)) return false;
+    if (!stageRarFiles(plannedInputs, inputs, &names, error, progress)) return false;
     const QString stagedArchive = temp.path() + "/archive.rar";
-    QStringList args = {"a", "-y", "-ep", "-m" + QString::number(level < 0 ? 3 : level), stagedArchive};
+    QStringList args = {"a", "-y", "-r", "-ep1", "-m" + QString::number(level < 0 ? 3 : level), stagedArchive};
     args.append(names);
     if (!runRar(args, inputs, error, progress)) return false;
     QList<Entry> check;
@@ -641,6 +705,8 @@ bool saveRarEdits(const QString &path, const QList<Entry> &entries, const QSet<Q
     for (const Entry &entry : entries) if (entry.directory && removed.contains(entry.path)) {
         *error = "Select files individually to delete them from a RAR archive."; return false;
     }
+    QList<ArchiveInput> plannedInputs;
+    if (!collectInputs(added, path, &plannedInputs, error, progress)) return false;
     QTemporaryDir temp(QFileInfo(path).absolutePath() + "/.archivist-XXXXXX");
     if (!temp.isValid()) { *error = "Could not prepare a temporary archive."; return false; }
     const QString stagedArchive = temp.path() + "/archive.rar";
@@ -670,8 +736,8 @@ bool saveRarEdits(const QString &path, const QList<Entry> &entries, const QSet<Q
     if (!added.isEmpty()) {
         QStringList names;
         const QString inputs = temp.path() + "/inputs";
-        if (!stageRarFiles(added, inputs, &names, error, progress)) return false;
-        QStringList args = {"a", "-y", "-ep", "-m" + QString::number(level < 0 ? 3 : level), stagedArchive};
+        if (!stageRarFiles(plannedInputs, inputs, &names, error, progress)) return false;
+        QStringList args = {"a", "-y", "-r", "-ep1", "-m" + QString::number(level < 0 ? 3 : level), stagedArchive};
         args.append(names);
         if (!runRar(args, inputs, error, progress)) return false;
     }
@@ -713,15 +779,17 @@ public:
         layout->addLayout(form);
         levelHint_ = new QLabel;
         layout->addWidget(levelHint_);
-        layout->addWidget(new QLabel("Files to include (optional)"));
+        layout->addWidget(new QLabel("Files and folders to include (optional)"));
         files_ = new QListWidget;
         files_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         files_->setMinimumHeight(120);
         layout->addWidget(files_);
         auto *fileRow = new QHBoxLayout;
         auto *add = new QPushButton("Add files…");
+        auto *addFolder = new QPushButton("Add folder…");
         auto *remove = new QPushButton("Remove selected");
         fileRow->addWidget(add);
+        fileRow->addWidget(addFolder);
         fileRow->addWidget(remove);
         fileRow->addStretch();
         layout->addLayout(fileRow);
@@ -732,8 +800,7 @@ public:
             const QString path = QFileDialog::getExistingDirectory(this, "Choose archive folder", folder_->text());
             if (!path.isEmpty()) folder_->setText(path);
         });
-        connect(add, &QPushButton::clicked, this, [this] {
-            const QStringList paths = QFileDialog::getOpenFileNames(this, "Files to include", folder_->text());
+        auto addPaths = [this](const QStringList &paths) {
             for (const QString &path : paths) {
                 bool duplicate = false;
                 for (int i = 0; i < files_->count(); ++i)
@@ -744,6 +811,13 @@ public:
                     item->setToolTip(path);
                 }
             }
+        };
+        connect(add, &QPushButton::clicked, this, [this, addPaths] {
+            addPaths(QFileDialog::getOpenFileNames(this, "Files to include", folder_->text()));
+        });
+        connect(addFolder, &QPushButton::clicked, this, [this, addPaths] {
+            const QString path = QFileDialog::getExistingDirectory(this, "Folder to include", folder_->text());
+            if (!path.isEmpty()) addPaths({path});
         });
         connect(remove, &QPushButton::clicked, this, [this] {
             qDeleteAll(files_->selectedItems());
@@ -806,8 +880,8 @@ private:
         }
         for (const QString &path : files()) {
             const QFileInfo info(path);
-            if (!info.isFile() || !info.isReadable()) {
-                QMessageBox::warning(this, "Unreadable file", "Cannot read " + path); return;
+            if (info.isSymLink() || (!info.isFile() && !info.isDir()) || !info.isReadable()) {
+                QMessageBox::warning(this, "Unreadable item", "Cannot read " + path); return;
             }
             if (names.contains(info.fileName())) {
                 QMessageBox::warning(this, "Duplicate file name", "The selected files include two named " + info.fileName() + "."); return;
@@ -922,6 +996,7 @@ public:
         extractAction_ = bar->addAction("Extract");
         bar->addSeparator();
         addAction_ = bar->addAction("Add files");
+        addFolderAction_ = bar->addAction("Add folder");
         renameAction_ = bar->addAction("Rename");
         deleteAction_ = bar->addAction("Delete");
         heading_ = new QLabel("Create or open an archive to get started");
@@ -952,6 +1027,7 @@ public:
         connect(openAction, &QAction::triggered, this, [this] { chooseArchive(); });
         connect(extractAction_, &QAction::triggered, this, [this] { extract(); });
         connect(addAction_, &QAction::triggered, this, [this] { addFiles(); });
+        connect(addFolderAction_, &QAction::triggered, this, [this] { addFolder(); });
         connect(renameAction_, &QAction::triggered, this, [this] { renameEntry(); });
         connect(deleteAction_, &QAction::triggered, this, [this] { deleteEntries(); });
         connect(about, &QPushButton::clicked, this, [this] { showAbout(); });
@@ -1028,7 +1104,7 @@ private:
         } else {
             qint64 total = 0;
             for (const QString &source : files) total += std::max<qint64>(0, QFileInfo(source).size());
-            ProgressDialog progress(this, "Creating archive", dialog.format() == WriteFormat::Rar ? 0 : total);
+            ProgressDialog progress(this, "Creating archive", dialog.format() == WriteFormat::Rar || std::any_of(files.cbegin(), files.cend(), [](const QString &p) { return QFileInfo(p).isDir(); }) ? 0 : total);
             const ProgressCallback callback = [&](qint64 bytes, const QString &name) { return progress.report(bytes, name); };
             ok = dialog.format() == WriteFormat::Rar
                      ? createRarArchive(path, dialog.level(), files, &error, callback)
@@ -1086,7 +1162,7 @@ private:
         }
         for (const QString &source : added) total += std::max<qint64>(0, QFileInfo(source).size());
         const bool useRar = writeFormat(archivePath_) == WriteFormat::Rar;
-        ProgressDialog progress(this, title, useRar ? 0 : total);
+        ProgressDialog progress(this, title, useRar || std::any_of(added.cbegin(), added.cend(), [](const QString &p) { return QFileInfo(p).isDir(); }) ? 0 : total);
         QString error;
         const int level = QSettings().value(compressionSettingKey(archivePath_), -1).toInt();
         const ProgressCallback callback = [&](qint64 bytes, const QString &name) { return progress.report(bytes, name); };
@@ -1110,6 +1186,7 @@ private:
             rarFolderSelected |= entryAt(index).directory;
         extractAction_->setEnabled(!archivePath_.isEmpty());
         addAction_->setEnabled(editable);
+        addFolderAction_->setEnabled(editable);
         deleteAction_->setEnabled(editable && count > 0 && !rarFolderSelected);
         deleteAction_->setToolTip(rarFolderSelected ? "Select files individually to delete them from a RAR archive." : "");
         renameAction_->setEnabled(editable && count == 1 && entryAt(selected.first()).regular);
@@ -1135,9 +1212,18 @@ private:
 
     void addFiles() {
         const QStringList paths = QFileDialog::getOpenFileNames(this, "Add files", QDir::homePath());
+        addPaths(paths);
+    }
+
+    void addFolder() {
+        const QString path = QFileDialog::getExistingDirectory(this, "Add folder", QDir::homePath());
+        if (!path.isEmpty()) addPaths({path});
+    }
+
+    void addPaths(const QStringList &paths) {
         if (paths.isEmpty()) return;
         QSet<QString> names;
-        for (const Entry &e : model_->entries()) names.insert(e.path);
+        for (const Entry &e : model_->entries()) names.insert(e.path.section('/', 0, 0));
         for (const QString &path : paths) {
             const QString name = QFileInfo(path).fileName();
             if (names.contains(name)) { QMessageBox::warning(this, "Name already exists", name + " is already in the archive."); return; }
@@ -1173,6 +1259,7 @@ private:
     ArchiveTableModel *model_ = nullptr;
     QSortFilterProxyModel *sortModel_ = nullptr;
     QAction *addAction_ = nullptr;
+    QAction *addFolderAction_ = nullptr;
     QAction *extractAction_ = nullptr;
     QAction *renameAction_ = nullptr;
     QAction *deleteAction_ = nullptr;
