@@ -10,6 +10,11 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
@@ -52,8 +57,63 @@
 #include <algorithm>
 #include <functional>
 #include <utility>
+#include <memory>
+#include <vector>
 
 namespace {
+
+QStringList localDropPaths(const QMimeData *mime) {
+    QStringList paths;
+    if (!mime || !mime->hasUrls()) return paths;
+    for (const QUrl &url : mime->urls()) {
+        if (!url.isLocalFile()) return {};
+        const QFileInfo info(url.toLocalFile());
+        if (!info.exists() || (!info.isFile() && !info.isDir())) return {};
+        const QString path = info.absoluteFilePath();
+        if (!paths.contains(path)) paths.append(path);
+    }
+    return paths;
+}
+
+class FileDropFilter : public QObject {
+public:
+    FileDropFilter(QWidget *target, std::function<void(const QStringList &)> receive,
+                   std::function<bool()> enabled = [] { return true; })
+        : QObject(target), receive_(std::move(receive)), enabled_(std::move(enabled)) {
+        target->setAcceptDrops(true);
+        target->installEventFilter(this);
+    }
+protected:
+    bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() != QEvent::DragEnter && event->type() != QEvent::DragMove &&
+            event->type() != QEvent::Drop) return false;
+        auto *drop = static_cast<QDropEvent *>(event);
+        const QStringList paths = localDropPaths(drop->mimeData());
+        if (!enabled_() || paths.isEmpty() || !(drop->possibleActions() & Qt::CopyAction)) {
+            drop->ignore();
+            return true;
+        }
+        drop->setDropAction(Qt::CopyAction);
+        drop->accept();
+        if (event->type() == QEvent::Drop) {
+            // Finish handling the native drop before opening modal dialogs.
+            QTimer::singleShot(0, this, [this, paths] { if (enabled_()) receive_(paths); });
+        }
+        return true;
+    }
+private:
+    std::function<void(const QStringList &)> receive_;
+    std::function<bool()> enabled_;
+};
+
+class ArchiveTableView : public QTableView {
+public:
+    std::function<void()> exportSelection;
+protected:
+    void startDrag(Qt::DropActions) override {
+        if (exportSelection) exportSelection();
+    }
+};
 
 struct Entry {
     QString path;
@@ -73,6 +133,10 @@ public:
         beginResetModel();
         entries_ = std::move(entries);
         endResetModel();
+    }
+
+    Qt::ItemFlags flags(const QModelIndex &index) const override {
+        return QAbstractTableModel::flags(index) | (index.isValid() ? Qt::ItemIsDragEnabled : Qt::NoItemFlags);
     }
 
     int rowCount(const QModelIndex &parent = {}) const override {
@@ -215,6 +279,43 @@ bool safeEntryPath(const QString &path) {
     const QStringList parts = path.split('/');
     if (parts.contains("..") || path.contains(':')) return false;
     return QDir::cleanPath(path) != ".";
+}
+
+bool hasSingleRootFolder(const QList<Entry> &entries) {
+    QString root;
+    for (const Entry &entry : entries) {
+        if ((!entry.regular && !entry.directory) || !safeEntryPath(entry.path)) continue;
+        const QString path = QDir::cleanPath(entry.path);
+        const QString first = path.section('/', 0, 0);
+        if (!path.contains('/') && !entry.directory) return false;
+        if (root.isEmpty()) root = first;
+        else if (root != first) return false;
+    }
+    return !root.isEmpty();
+}
+
+QString extractionFolderName(const QString &archivePath) {
+    const QString name = QFileInfo(archivePath).fileName();
+    const QString lower = name.toLower();
+    for (const QString &suffix : {QString(".tar.gz"), QString(".tar.bz2"), QString(".tar.xz"), QString(".tar.zst")}) {
+        if (lower.endsWith(suffix) && name.size() > suffix.size())
+            return name.left(name.size() - suffix.size());
+    }
+    const QString base = QFileInfo(name).completeBaseName();
+    return base.isEmpty() || base == "." || base == ".." ? QString("Archive") : base;
+}
+
+QString createExtractionFolder(const QString &parent, const QString &archivePath, QString *error) {
+    const QString base = extractionFolderName(archivePath);
+    for (int number = 1; ; ++number) {
+        const QString name = number == 1 ? base : base + QString(" (%1)").arg(number);
+        const QString path = QDir(parent).absoluteFilePath(name);
+        const QFileInfo info(path);
+        if (info.exists() || info.isSymLink()) continue;
+        if (QDir(parent).mkdir(name)) return path;
+        *error = "Could not create extraction folder: " + path;
+        return {};
+    }
 }
 
 archive *openReader(const QString &path, QString *error) {
@@ -748,7 +849,7 @@ bool saveRarEdits(const QString &path, const QList<Entry> &entries, const QSet<Q
 
 class NewArchiveDialog : public QDialog {
 public:
-    explicit NewArchiveDialog(QWidget *parent, const QString &initialFolder) : QDialog(parent) {
+    explicit NewArchiveDialog(QWidget *parent, const QString &initialFolder, const QStringList &initialFiles = {}) : QDialog(parent) {
         setWindowTitle("New archive");
         setMinimumWidth(500);
         auto *layout = new QVBoxLayout(this);
@@ -812,6 +913,8 @@ public:
                 }
             }
         };
+        new FileDropFilter(files_->viewport(), addPaths);
+        addPaths(initialFiles);
         connect(add, &QPushButton::clicked, this, [this, addPaths] {
             addPaths(QFileDialog::getOpenFileNames(this, "Files to include", folder_->text()));
         });
@@ -999,10 +1102,27 @@ public:
         addFolderAction_ = bar->addAction("Add folder");
         renameAction_ = bar->addAction("Rename");
         deleteAction_ = bar->addAction("Delete");
-        heading_ = new QLabel("Create or open an archive to get started");
+        heading_ = new QLabel("Drop an archive to open it, or drop files and folders to compress");
         layout->addWidget(heading_);
         layout->addWidget(bar);
-        table_ = new QTableView;
+        auto *archiveTable = new ArchiveTableView;
+        table_ = archiveTable;
+        table_->setDragEnabled(true);
+        table_->setDragDropMode(QAbstractItemView::DragOnly);
+        archiveTable->exportSelection = [this] { dragSelection(); };
+        auto receive = [this](const QStringList &paths) {
+            if (!archivePath_.isEmpty()) { addPaths(paths); return; }
+            QList<Entry> entries;
+            QString error;
+            if (paths.size() == 1 && QFileInfo(paths.first()).isFile() &&
+                listArchive(paths.first(), &entries, &error)) openArchive(paths.first());
+            else newArchive(paths);
+        };
+        auto canDrop = [this] {
+            return !dragging_ && (archivePath_.isEmpty() || editableFormat(writeFormat(archivePath_)));
+        };
+        new FileDropFilter(table_->viewport(), receive, canDrop);
+        new FileDropFilter(this, receive, canDrop);
         model_ = new ArchiveTableModel(table_);
         sortModel_ = new QSortFilterProxyModel(table_);
         sortModel_->setSourceModel(model_);
@@ -1089,9 +1209,9 @@ private:
         dialog.exec();
     }
 
-    void newArchive() {
+    void newArchive(const QStringList &initialFiles = {}) {
         const QString folder = archivePath_.isEmpty() ? QDir::homePath() : QFileInfo(archivePath_).absolutePath();
-        NewArchiveDialog dialog(this, folder);
+        NewArchiveDialog dialog(this, folder, initialFiles);
         if (dialog.exec() != QDialog::Accepted) return;
         const QString path = dialog.archivePath();
         const QStringList files = dialog.files();
@@ -1195,11 +1315,18 @@ private:
     void extract() {
         if (archivePath_.isEmpty()) { chooseArchive(); return; }
         const QSet<QString> selected = selectedPaths();
-        const QString destination = QFileDialog::getExistingDirectory(this,
+        const bool needsFolder = selected.isEmpty() && !model_->entries().isEmpty() &&
+                                 !hasSingleRootFolder(model_->entries());
+        QString destination = QFileDialog::getExistingDirectory(this,
+            needsFolder ? "Choose where to create extracted folder" :
             selected.isEmpty() ? "Extract all to" : "Extract selected to", QFileInfo(archivePath_).absolutePath());
         if (destination.isEmpty()) return;
         int written = 0, skipped = 0;
         QString error;
+        if (needsFolder) {
+            destination = createExtractionFolder(destination, archivePath_, &error);
+            if (destination.isEmpty()) { QMessageBox::critical(this, "Extraction stopped", error); return; }
+        }
         ProgressDialog progress(this, "Extracting archive", extractionTotal(selected));
         const bool ok = extractArchive(archivePath_, destination, selected, selected.isEmpty(), &written, &skipped, &error,
                                        [&](qint64 bytes, const QString &name) { return progress.report(bytes, name); });
@@ -1207,7 +1334,50 @@ private:
         if (!ok && error == "Canceled") QMessageBox::information(this, "Extraction canceled",
             QString("Stopped after extracting %1 item(s). Files already extracted remain in the destination.").arg(written));
         else if (!ok) QMessageBox::critical(this, "Extraction stopped", error);
-        else QMessageBox::information(this, "Extraction complete", QString("Extracted %1 item(s). Skipped %2 unsafe or existing item(s).").arg(written).arg(skipped));
+        else QMessageBox::information(this, "Extraction complete", QString("Extracted %1 item(s) to %3. Skipped %2 unsafe or existing item(s).").arg(written).arg(skipped).arg(destination));
+    }
+
+    void dragSelection() {
+        const QSet<QString> selected = selectedPaths();
+        if (archivePath_.isEmpty() || selected.isEmpty() || dragging_) return;
+        dragging_ = true;
+        auto staging = std::make_unique<QTemporaryDir>();
+        int written = 0, skipped = 0;
+        QString error;
+        // Wayland requires the original implicit pointer grab at start_drag.
+        // Do not show a modal window or pump events before QDrag::exec(): either
+        // can consume the release or transfer focus away from the source surface.
+        const bool ok = staging->isValid() && extractArchive(archivePath_, staging->path(), selected, false,
+            &written, &skipped, &error);
+        if (!ok) {
+            dragging_ = false;
+            if (error != "Canceled") QMessageBox::critical(this, "Could not prepare files", error.isEmpty() ? "Could not create temporary folder." : error);
+            return;
+        }
+        QList<QUrl> urls;
+        QStringList paths = selected.values();
+        std::sort(paths.begin(), paths.end());
+        QStringList exported;
+        for (const QString &path : paths) {
+            if (!safeEntryPath(path) || !QFileInfo::exists(staging->path() + '/' + path)) continue;
+            bool covered = false;
+            for (const QString &parent : exported)
+                if (path.startsWith(parent + '/')) { covered = true; break; }
+            if (!covered) {
+                exported.append(path);
+                urls.append(QUrl::fromLocalFile(staging->path() + '/' + path));
+            }
+        }
+        if (!urls.isEmpty()) {
+            auto *mime = new QMimeData;
+            mime->setUrls(urls);
+            // File managers may read the URLs after the native drag has returned.
+            dragFiles_.push_back(std::move(staging));
+            QDrag drag(table_);
+            drag.setMimeData(mime);
+            drag.exec(Qt::CopyAction, Qt::CopyAction);
+        }
+        dragging_ = false;
     }
 
     void addFiles() {
@@ -1253,6 +1423,8 @@ private:
         performEdit(selected, {}, {}, "Deleting entries");
     }
 
+    bool dragging_ = false;
+    std::vector<std::unique_ptr<QTemporaryDir>> dragFiles_;
     QString archivePath_;
     QLabel *heading_ = nullptr;
     QTableView *table_ = nullptr;

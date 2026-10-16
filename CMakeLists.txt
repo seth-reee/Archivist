@@ -19,6 +19,7 @@ add_executable(archivist_tests tests.cpp)
 target_compile_definitions(archivist_tests PRIVATE ARCHIVIST_VERSION="${PROJECT_VERSION}")
 target_link_libraries(archivist_tests PRIVATE Qt6::Widgets PkgConfig::LIBARCHIVE)
 add_test(NAME archivist_tests COMMAND archivist_tests)
+set_tests_properties(archivist_tests PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 install(TARGETS archivist RUNTIME DESTINATION bin)
 install(FILES archivist.png DESTINATION share/pixmaps)

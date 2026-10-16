@@ -27,6 +27,12 @@ Open **Archivist** from the application menu.
 
 Choose **New archive** to pick a name, location, format, and compression level. Add files and folders with their separate picker buttons; both appear in the same archive, and folders include their nested contents. You can also start with an empty archive. Choose **Open** to browse an existing archive, then use **Extract** or the edit buttons in the toolbar.
 
+Drag files and folders into an empty Archivist window to start a new archive, or into an open editable archive to add them. You can also drop them into the file list in **New archive**. Dropping a single readable archive into an empty window opens it.
+
+Select entries and drag them into your file manager to extract copies, including the contents of selected folders. Files are prepared before the drag starts; large selections may take some time. Temporary extracted copies remain available until Archivist closes, so allow the file manager to finish copying before closing it. Dragging never removes entries from the archive.
+
+When extracting the whole archive, Archivist creates a folder named after the archive if its contents are not already inside one top-level folder. If that destination name already exists, it uses a numbered folder. Extracting selected entries keeps the destination you choose.
+
 Archivist skips unsafe archive paths and does not overwrite existing extracted files. Password protected and split archives are not supported yet.
 
 ## Build from source
