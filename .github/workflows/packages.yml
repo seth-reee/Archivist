@@ -1,0 +1,80 @@
+name: Arch Linux packages
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            image: archlinux:base-devel
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: lfdevs/archlinuxarm:base-devel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare source and pinned recipe
+        run: bash packaging/prepare-ci.sh "$PWD/dist"
+      - name: Build native Arch Linux environment
+        env:
+          BASE_IMAGE: ${{ matrix.image }}
+        run: |
+          docker build --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            --build-arg BUILDER_UID="$(id -u)" \
+            -t archivist-builder -f packaging/Dockerfile.ci packaging
+      - name: Build, test, and inspect package
+        env:
+          PACKAGE_ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm \
+            --mount "type=bind,src=$PWD,dst=/repo,readonly" \
+            --mount "type=bind,src=$PWD/dist,dst=/out" \
+            archivist-builder bash /repo/packaging/build-ci.sh "$PACKAGE_ARCH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archivist-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Prepare draft release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archivist-*
+          path: dist
+          merge-multiple: true
+      - name: Attach packages to a new draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --draft --generate-notes

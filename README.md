@@ -45,6 +45,14 @@ cmake --build build
 ./build/archivist
 ```
 
+## Automated packages
+
+GitHub Actions builds native x86_64 and ARM64 Arch packages on pushes to `master`, pull requests, and manual runs of **Arch Linux packages**. Download the `archivist-x86_64` or `archivist-aarch64` artifact from a successful Actions run. Each includes a `.pkg.tar.zst` package, its source archive, a pinned local-source PKGBUILD, and checksums. Development versions include the commit count and hash.
+
+To prepare a release, update the version in `CMakeLists.txt` and `packaging/PKGBUILD`, update the release recipe's source checksum, and push a matching `vVERSION` tag. After both builds pass, Actions creates a **draft** GitHub release with both packages. Review and publish the draft when ready; existing releases are not replaced. The tagged source must contain this workflow.
+
+Both architectures run the archive and widget tests, verify package metadata and ELF architecture, and perform an offscreen startup check. These checks do not replace testing on a real desktop.
+
 ## License
 
 Archivist is made by [seth-reee](https://github.com/seth-reee) and is available under the [MIT License](LICENSE).

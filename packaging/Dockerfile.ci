@@ -1,0 +1,9 @@
+ARG BASE_IMAGE=archlinux:base-devel
+FROM ${BASE_IMAGE}
+
+# Bootstrap directly with pacman, before invoking the ARM image's old Bash.
+RUN ["/usr/bin/pacman", "-Syu", "--noconfirm", "--needed", "base-devel", "cmake", "ninja", "qt6-base", "libarchive", "pkgconf"]
+ARG BUILDER_UID=1000
+RUN useradd --uid "${BUILDER_UID}" --create-home builder
+USER builder
+WORKDIR /tmp
