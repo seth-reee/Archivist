@@ -47,9 +47,9 @@ cmake --build build
 
 ## Automated packages
 
-GitHub Actions builds native x86_64 and ARM64 Arch packages on pushes to `master`, pull requests, and manual runs of **Arch Linux packages**. Download the `archivist-x86_64` or `archivist-aarch64` artifact from a successful Actions run. Each includes a `.pkg.tar.zst` package, its source archive, a pinned local-source PKGBUILD, and checksums. Development versions include the commit count and hash.
+Every push to `master` automatically prepares the next patch version, builds native x86_64 and ARM64 Arch packages, and publishes a GitHub release after both builds pass. The workflow commits the new version and pinned source checksum, pushes the matching tag, uploads both packages and their source, and verifies the uploaded checksums before publishing. It uses the built-in GitHub token and does not trigger recursive releases. If you increase the version in `CMakeLists.txt` and `packaging/PKGBUILD` yourself, that untagged version is used instead of an automatic patch bump.
 
-To prepare a release, update the version in `CMakeLists.txt` and `packaging/PKGBUILD`, update the release recipe's source checksum, and push a matching `vVERSION` tag. After both builds pass, Actions creates a **draft** GitHub release with both packages. Review and publish the draft when ready; existing releases are not replaced. The tagged source must contain this workflow.
+Pull requests build development packages without publishing. Manual runs on `master` also release; matching `vVERSION` tags build and publish that version. Artifacts are available from the **Arch Linux packages** workflow: download the architecture artifact and `archivist-source` for the package, source archive, recipe, and checksums. Existing published releases are verified rather than replaced.
 
 Both architectures run the archive and widget tests, verify package metadata and ELF architecture, and perform an offscreen startup check. These checks do not replace testing on a real desktop.
 
