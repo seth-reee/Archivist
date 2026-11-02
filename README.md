@@ -56,3 +56,50 @@ Both architectures run the archive and widget tests, verify package metadata and
 ## License
 
 Archivist is made by [seth-reee](https://github.com/seth-reee) and is available under the [MIT License](LICENSE).
+
+## NixOS and Nix-based Omarchy forks
+
+The flake provides `archivist` and `default` packages for `x86_64-linux` and
+`aarch64-linux`, with pinned nixpkgs dependencies. From a checkout:
+
+```sh
+nix build .#archivist
+nix run .#archivist
+```
+
+For a declarative NixOS install, add this input to your system flake:
+
+```nix
+inputs.archivist.url = "github:seth-reee/Archivist";
+```
+
+Pass `inputs` using `specialArgs = { inherit inputs; };`, then add to a module:
+
+```nix
+{ inputs, pkgs, ... }: {
+  environment.systemPackages = [
+    inputs.archivist.packages.${pkgs.stdenv.hostPlatform.system}.archivist
+  ];
+}
+```
+
+For Home Manager, use the same package in `home.packages` and provide `inputs`
+through `extraSpecialArgs`. Update your system's flake lock to get new releases.
+
+Archive support uses Nix's `libarchive`. RAR creation/editing remains optional:
+install the separately licensed `rar` tool on your search path to enable it.
+The default Nix package does not require unfree packages.
+
+CI builds both architectures on native runners. Download the matching
+`archivist-VERSION-nix-SYSTEM.nar.xz`, `.store-path`, and `SHA256SUMS-nix-SYSTEM`
+files from a release (replace VERSION and SYSTEM), then import and install:
+
+```sh
+sha256sum -c SHA256SUMS-nix-SYSTEM
+xz -dc archivist-VERSION-nix-SYSTEM.nar.xz | sudo nix-store --import
+nix profile install "$(cat archivist-VERSION-nix-SYSTEM.store-path)"
+```
+
+Nix must already be installed. Omit `sudo` for single-user Nix installations.
+The exports include the full runtime closure; a declarative flake installation
+is preferred on NixOS. Omarchy itself is optional.

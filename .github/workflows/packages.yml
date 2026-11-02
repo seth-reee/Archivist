@@ -1,4 +1,4 @@
-name: Arch Linux packages
+name: Linux packages
 
 on:
   push:
@@ -93,10 +93,47 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  nix:
+    name: Build Nix ${{ matrix.system }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: archivist-source
+          path: dist
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, test, and export Nix closure
+        env:
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+          PACKAGE_SYSTEM: ${{ matrix.system }}
+        run: bash packaging/nix/build-ci.sh "$PWD/dist"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: archivist-nix-${{ matrix.system }}
+          path: |
+            dist/*.nar.xz
+            dist/*.store-path
+            dist/SHA256SUMS-nix-*
+          if-no-files-found: error
+          retention-days: 30
+
   release:
     name: Publish release
     if: needs.prepare.outputs.release == 'true'
-    needs: [prepare, build]
+    needs: [prepare, build, nix]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

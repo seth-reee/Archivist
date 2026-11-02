@@ -30,7 +30,7 @@ archive="$pkgname-$pkgver.tar.gz"
 # Stable metadata makes both architectures and retries use identical source bytes.
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   --transform="s,^,Archivist-$pkgver/," -cf - \
-  CMakeLists.txt LICENSE README.md main.cpp tests.cpp archivist.desktop archivist.png \
+  CMakeLists.txt LICENSE README.md main.cpp tests.cpp archivist.desktop archivist.png flake.nix flake.lock packaging/nix \
   | gzip -n > "$output_dir/$archive"
 checksum=$(sha256sum "$output_dir/$archive" | cut -d ' ' -f 1)
 sed -e "s/^pkgver=.*/pkgver=$pkgver/" \
