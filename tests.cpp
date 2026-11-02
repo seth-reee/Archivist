@@ -4,12 +4,18 @@
 
 #include <QCoreApplication>
 #include <QDebug>
+#include <cstdio>
+#include <cstdlib>
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     QString error;
     auto require = [&](bool condition, const char *message) {
-        if (!condition) qFatal("%s: %s", message, qPrintable(error));
+        if (!condition) {
+            std::fprintf(stderr, "%s: %s\n", message, qPrintable(error));
+            std::fflush(stderr);
+            std::abort();
+        }
     };
     QTemporaryDir temp;
     require(temp.isValid(), "temporary directory");
@@ -109,9 +115,18 @@ int main(int argc, char **argv) {
     const QImage painted = table->viewport()->grab().toImage();
     const QRect selectedRect = table->visualRect(table->model()->index(0, 1));
     const QRect plainRect = table->visualRect(table->model()->index(6, 1));
-    const QColor selectedPixel = painted.pixelColor(selectedRect.left() + 12, selectedRect.center().y());
-    const QColor plainPixel = painted.pixelColor(plainRect.left() + 12, plainRect.center().y());
-    require(selectedPixel == app.palette().color(QPalette::Highlight) && selectedPixel != plainPixel,
+    const QColor highlight = app.palette().color(QPalette::Highlight);
+    auto highlightFraction = [&](const QRect &rect) {
+        const QRect area = rect.adjusted(2, 2, -2, -2).intersected(painted.rect());
+        require(!area.isEmpty(), "highlight sample is inside the visible viewport");
+        int matching = 0;
+        for (int y = area.top(); y <= area.bottom(); ++y)
+            for (int x = area.left(); x <= area.right(); ++x)
+                matching += painted.pixelColor(x, y) == highlight;
+        return double(matching) / (area.width() * area.height());
+    };
+    // Font metrics and missing-font glyphs can put text at any single sample point.
+    require(highlightFraction(selectedRect) > 0.5 && highlightFraction(plainRect) < 0.1,
             "selected rows visibly render the theme accent background");
     mouse(QEvent::MouseButtonPress, first, Qt::LeftButton, Qt::LeftButton);
     require(table->dragEnabled(), "normal drag exports an existing selection");
