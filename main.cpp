@@ -16,6 +16,10 @@
 #include <QMimeData>
 #include <QUrl>
 #include <QElapsedTimer>
+#include <QEventLoop>
+#include <QFutureWatcher>
+#include <QtConcurrentRun>
+#include <QMouseEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -54,6 +58,7 @@
 #include <QToolBar>
 #include <QVBoxLayout>
 
+#include <atomic>
 #include <algorithm>
 #include <functional>
 #include <utility>
@@ -110,6 +115,18 @@ class ArchiveTableView : public QTableView {
 public:
     std::function<void()> exportSelection;
 protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        // Drag selected rows to export; drag an unselected row to select a range.
+        const QModelIndex index = indexAt(event->position().toPoint());
+        if (event->button() == Qt::LeftButton)
+            setDragEnabled(index.isValid() && selectionModel()->isSelected(index) &&
+                           (event->modifiers() == Qt::NoModifier || event->modifiers() == Qt::AltModifier));
+        QTableView::mousePressEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        QTableView::mouseReleaseEvent(event);
+        setDragEnabled(true);
+    }
     void startDrag(Qt::DropActions) override {
         if (exportSelection) exportSelection();
     }
@@ -185,7 +202,7 @@ using ProgressCallback = std::function<bool(qint64, const QString &)>;
 
 class ProgressDialog : public QDialog {
 public:
-    ProgressDialog(QWidget *parent, const QString &title, qint64 totalBytes)
+    ProgressDialog(QWidget *parent, const QString &title, qint64 totalBytes, bool pumpEvents = true)
         : QDialog(parent), totalBytes_(std::max<qint64>(0, totalBytes)) {
         setWindowTitle(title);
         setWindowModality(Qt::WindowModal);
@@ -211,13 +228,13 @@ public:
         });
         clock_.start();
         show();
-        QApplication::processEvents();
+        if (pumpEvents) QApplication::processEvents();
     }
 
     bool report(qint64 bytes, const QString &path) {
         doneBytes_ += std::max<qint64>(0, bytes);
         const qint64 now = clock_.elapsed();
-        if (now - lastUpdate_ >= 100 || path != lastPath_ || canceled_) {
+        if (now - lastUpdate_ >= 100 || canceled_) {
             lastUpdate_ = now;
             lastPath_ = path;
             current_->setText(path.isEmpty() ? "Working…" : path);
@@ -242,6 +259,20 @@ public:
         }
         return !canceled_;
     }
+
+    void showScanProgress(const QString &name, qint64 bytes, qint64 total, qint64 entries) {
+        current_->setText(canceled_ ? "Stopping scan…" : "Scanning " + name);
+        current_->setToolTip(name);
+        // Input buffering can reach EOF before the last entries are decoded.
+        bar_->setRange(0, total > 0 ? 1000 : 0);
+        if (total > 0)
+            bar_->setValue(static_cast<int>(std::min<long double>(990, 1000.0L * bytes / total)));
+        details_->setText(QString("%1 entries found · %2 / %3 read · %4s elapsed")
+            .arg(entries).arg(QLocale().formattedDataSize(bytes))
+            .arg(QLocale().formattedDataSize(total)).arg(clock_.elapsed() / 1000));
+    }
+
+    bool canceled() const { return canceled_; }
 
     void finish() {
         if (totalBytes_ > 0) bar_->setValue(1000);
@@ -331,13 +362,23 @@ archive *openReader(const QString &path, QString *error) {
     return reader;
 }
 
-bool listArchive(const QString &path, QList<Entry> *entries, QString *error) {
+bool listArchive(const QString &path, QList<Entry> *entries, QString *error,
+                 const std::function<bool()> &keepGoing = {},
+                 const std::function<void(qint64)> &bytesRead = {}) {
     archive *reader = openReader(path, error);
     if (!reader) return false;
     entries->clear();
     archive_entry *raw = nullptr;
     int result;
-    while ((result = archive_read_next_header(reader, &raw)) == ARCHIVE_OK) {
+    while (true) {
+        if (keepGoing && !keepGoing()) {
+            *error = "Canceled";
+            archive_read_free(reader);
+            return false;
+        }
+        result = archive_read_next_header(reader, &raw);
+        if (bytesRead) bytesRead(std::max<qint64>(0, archive_filter_bytes(reader, -1)));
+        if (result != ARCHIVE_OK) break;
         Entry item;
         item.path = cleanEntryPath(QString::fromUtf8(archive_entry_pathname(raw)));
         item.size = archive_entry_size(raw);
@@ -345,7 +386,11 @@ bool listArchive(const QString &path, QList<Entry> *entries, QString *error) {
         item.directory = archive_entry_filetype(raw) == AE_IFDIR;
         item.regular = archive_entry_filetype(raw) == AE_IFREG;
         if (!item.path.isEmpty() && item.path != ".") entries->append(item);
-        archive_read_data_skip(reader);
+        if (archive_read_data_skip(reader) < ARCHIVE_OK) {
+            *error = archiveError(reader);
+            archive_read_free(reader);
+            return false;
+        }
     }
     const bool ok = result == ARCHIVE_EOF;
     if (!ok) *error = archiveError(reader);
@@ -1034,7 +1079,8 @@ void applyOmarchyPalette(QApplication &app) {
     const QColor panel = color("lighter_background", bg.lighter(115));
     const QColor fg = color("foreground", QColor("#bebebe"));
     const QColor accent = color("accent", QColor("#e68e0d"));
-    const QColor selection = color("selection", QColor("#333333"));
+    const QColor selection = accent;
+    const QColor selectionText = qGray(selection.rgb()) > 140 ? QColor(Qt::black) : QColor(Qt::white);
     const QColor muted = color("muted", QColor("#333333"));
     const QColor disabled = color("dark_foreground", QColor("#555555"));
     QPalette palette = app.palette();
@@ -1046,7 +1092,7 @@ void applyOmarchyPalette(QApplication &app) {
     palette.setColor(QPalette::Button, panel);
     palette.setColor(QPalette::ButtonText, fg);
     palette.setColor(QPalette::Highlight, selection);
-    palette.setColor(QPalette::HighlightedText, fg);
+    palette.setColor(QPalette::HighlightedText, selectionText);
     palette.setColor(QPalette::ToolTipBase, panel);
     palette.setColor(QPalette::ToolTipText, fg);
     palette.setColor(QPalette::PlaceholderText, color("light_foreground", fg.darker(120)));
@@ -1060,12 +1106,12 @@ void applyOmarchyPalette(QApplication &app) {
         "QPushButton:hover, QToolButton:hover { border-color: %2; } "
         "QPushButton:disabled, QToolButton:disabled { color: %3; } "
         "QToolBar { spacing: 4px; border: none; } "
-        "QTableWidget { border: 1px solid %1; border-radius: 6px; gridline-color: %1; } "
+        "QTableView { border: 1px solid %1; border-radius: 6px; gridline-color: %1; } "
         "QHeaderView::section { background: %4; padding: 8px; border: none; border-bottom: 1px solid %1; } "
-        "QTableWidget::item { padding: 5px; } QTableWidget::item:selected { background: %5; } "
+        "QTableView::item { padding: 5px; } QTableView::item:selected { background: %5; color: %6; } "
         "QMenu { border: 1px solid %1; padding: 4px; } "
         "QMenu::item { padding: 6px 24px 6px 10px; } QMenu::item:selected { background: %5; }")
-        .arg(muted.name(), accent.name(), disabled.name(), panel.name(), selection.name()));
+        .arg(muted.name(), accent.name(), disabled.name(), panel.name(), selection.name(), selectionText.name()));
 }
 
 class MainWindow : public QMainWindow {
@@ -1112,14 +1158,12 @@ public:
         archiveTable->exportSelection = [this] { dragSelection(); };
         auto receive = [this](const QStringList &paths) {
             if (!archivePath_.isEmpty()) { addPaths(paths); return; }
-            QList<Entry> entries;
-            QString error;
-            if (paths.size() == 1 && QFileInfo(paths.first()).isFile() &&
-                listArchive(paths.first(), &entries, &error)) openArchive(paths.first());
+            if (paths.size() == 1 && QFileInfo(paths.first()).isFile())
+                openArchive(paths.first(), true);
             else newArchive(paths);
         };
         auto canDrop = [this] {
-            return !dragging_ && (archivePath_.isEmpty() || editableFormat(writeFormat(archivePath_)));
+            return !loading_ && !dragging_ && (archivePath_.isEmpty() || editableFormat(writeFormat(archivePath_)));
         };
         new FileDropFilter(table_->viewport(), receive, canDrop);
         new FileDropFilter(this, receive, canDrop);
@@ -1135,6 +1179,7 @@ public:
         table_->horizontalHeader()->resizeSection(1, 110);
         table_->horizontalHeader()->resizeSection(2, 180);
         table_->horizontalHeader()->resizeSection(3, 95);
+        table_->setToolTip("Drag an unselected row to select a range. Drag selected rows into your file manager to extract copies.");
         table_->setSelectionBehavior(QAbstractItemView::SelectRows);
         table_->setSelectionMode(QAbstractItemView::ExtendedSelection);
         table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -1156,10 +1201,50 @@ public:
         updateActions();
     }
 
-    void openArchive(const QString &path) {
+    void openArchive(const QString &path, bool createIfInvalid = false) {
+        if (loading_) return;
+        loading_ = true;
         QList<Entry> next;
         QString error;
-        if (!listArchive(path, &next, &error)) { QMessageBox::critical(this, "Cannot open archive", error); return; }
+        std::atomic_bool canceled{false};
+        std::atomic<qint64> count{0};
+        std::atomic<qint64> bytes{0};
+        const QString name = QFileInfo(path).fileName();
+        const qint64 total = QFileInfo(path).size();
+        ProgressDialog progress(this, "Scanning archive — " + name, 0, false);
+        progress.showScanProgress(name, 0, total, 0);
+        QFutureWatcher<bool> watcher;
+        QEventLoop loop;
+        QTimer timer;
+        connect(&timer, &QTimer::timeout, &progress, [&] {
+            progress.showScanProgress(name, bytes.load(), total, count.load());
+            if (progress.canceled()) canceled = true;
+        });
+        connect(&watcher, &QFutureWatcher<bool>::finished, &loop, &QEventLoop::quit);
+        watcher.setFuture(QtConcurrent::run([&] {
+            return listArchive(path, &next, &error, [&] {
+                count = next.size();
+                return !canceled.load();
+            }, [&](qint64 value) { bytes = value; });
+        }));
+        timer.start(100);
+        if (!watcher.isFinished()) loop.exec();
+        timer.stop();
+        const bool ok = watcher.result();
+        if (progress.canceled()) canceled = true;
+        if (canceled || error == "Canceled") {
+            progress.finish();
+            loading_ = false;
+            statusBar()->showMessage("Opening canceled", 5000);
+            return;
+        }
+        if (!ok) {
+            progress.finish();
+            loading_ = false;
+            if (createIfInvalid) newArchive({path});
+            else QMessageBox::critical(this, "Cannot open archive", error);
+            return;
+        }
         archivePath_ = QFileInfo(path).absoluteFilePath();
         model_->setEntries(std::move(next));
         heading_->setText(QFileInfo(archivePath_).fileName());
@@ -1167,6 +1252,8 @@ public:
         const QString mode = editableFormat(writeFormat(archivePath_)) ? "Editing available" : "View and extract";
         statusBar()->showMessage(QString("%1 entries · %2").arg(model_->entries().size()).arg(mode));
         updateActions();
+        progress.finish();
+        loading_ = false;
     }
 
 private:
@@ -1423,6 +1510,7 @@ private:
         performEdit(selected, {}, {}, "Deleting entries");
     }
 
+    bool loading_ = false;
     bool dragging_ = false;
     std::vector<std::unique_ptr<QTemporaryDir>> dragFiles_;
     QString archivePath_;
@@ -1474,6 +1562,9 @@ int main(int argc, char **argv) {
     refreshTheme();
     MainWindow window;
     window.show();
-    if (argc > 1) window.openArchive(QString::fromLocal8Bit(argv[1]));
+    if (argc > 1) {
+        const QString path = QString::fromLocal8Bit(argv[1]);
+        QTimer::singleShot(0, &window, [&window, path] { window.openArchive(path); });
+    }
     return app.exec();
 }

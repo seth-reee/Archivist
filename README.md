@@ -29,7 +29,11 @@ Choose **New archive** to pick a name, location, format, and compression level. 
 
 Drag files and folders into an empty Archivist window to start a new archive, or into an open editable archive to add them. You can also drop them into the file list in **New archive**. Dropping a single readable archive into an empty window opens it.
 
+Click and drag from an unselected row to select a range of files. Ctrl-click toggles individual rows and Shift-click extends the selection. To export, drag from an already selected row into your file manager.
+
 Select entries and drag them into your file manager to extract copies, including the contents of selected folders. Files are prepared before the drag starts; large selections may take some time. Temporary extracted copies remain available until Archivist closes, so allow the file manager to finish copying before closing it. Dragging never removes entries from the archive.
+
+Archive opening runs in the background with an immediate scanning popup showing the archive name, bytes read, entry count, elapsed time, and a Cancel button, keeping the window responsive for large archives. Sequential compressed formats still need to be scanned; cancellation takes effect between entries. Scan progress measures archive bytes read and stays below 100% until scanning and list preparation finish.
 
 When extracting the whole archive, Archivist creates a folder named after the archive if its contents are not already inside one top-level folder. If that destination name already exists, it uses a numbered folder. Extracting selected entries keeps the destination you choose.
 

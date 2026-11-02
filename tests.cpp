@@ -43,12 +43,83 @@ int main(int argc, char **argv) {
     require(drop.isAccepted() && drop.dropAction() == Qt::CopyAction, "file drop accepts copy only");
     QApplication::processEvents();
     require(received == QStringList({loose}), "file drop dispatches paths after native event");
+    applyOmarchyPalette(app);
     MainWindow window;
     auto *table = window.findChild<QTableView *>();
     require(table && table->viewport()->acceptDrops(), "archive table accepts external drops");
     QDragEnterEvent tableEnter(QPoint(5, 5), Qt::CopyAction, &dropped, Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(table->viewport(), &tableEnter);
     require(tableEnter.isAccepted(), "archive table accepts file drag through viewport");
+    // Many-entry archives exercise model installation and worker/UI separation.
+    const QString large = temp.path() + "/many.tar";
+    archive *many = archive_write_new();
+    archive_write_set_format_pax_restricted(many);
+    require(archive_write_open_filename(many, QFile::encodeName(large).constData()) == ARCHIVE_OK,
+            "open many-entry fixture");
+    for (int i = 0; i < 30000; ++i) {
+        archive_entry *item = archive_entry_new();
+        const QByteArray name = QString("file-%1.txt").arg(i, 5, 10, QChar('0')).toUtf8();
+        archive_entry_set_pathname(item, name.constData());
+        archive_entry_set_filetype(item, AE_IFREG);
+        archive_entry_set_perm(item, 0644);
+        archive_entry_set_size(item, 0);
+        require(archive_write_header(many, item) == ARCHIVE_OK, "write many-entry header");
+        archive_entry_free(item);
+    }
+    archive_write_close(many);
+    archive_write_free(many);
+    bool uiResponsive = false;
+    QTimer::singleShot(0, &window, [&] {
+        uiResponsive = true;
+        auto *popup = window.findChild<QDialog *>();
+        require(popup && popup->isVisible() && popup->windowTitle().contains("many.tar"),
+                "scanning popup appears immediately with archive name");
+        auto *bar = popup->findChild<QProgressBar *>();
+        require(bar && bar->maximum() == 1000, "scan displays byte progress");
+        bool hasDetails = false;
+        for (auto *label : popup->findChildren<QLabel *>())
+            hasDetails |= label->text().contains("entries found") && label->text().contains("elapsed");
+        require(hasDetails, "scan displays entry count and elapsed time");
+    });
+    window.openArchive(large);
+    require(uiResponsive && table->model()->rowCount() == 30000,
+            "large archive opens while UI events are serviced");
+    int checks = 0;
+    QList<Entry> canceledEntries;
+    require(!listArchive(large, &canceledEntries, &error, [&] { return ++checks < 10; }) &&
+            error == "Canceled" && canceledEntries.size() == 9, "cancel archive scan");
+    error.clear();
+    window.show();
+    QApplication::processEvents();
+    table->clearSelection();
+    auto mouse = [&](QEvent::Type type, const QPoint &point, Qt::MouseButton button,
+                     Qt::MouseButtons buttons, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        QMouseEvent event(type, QPointF(point), QPointF(table->viewport()->mapToGlobal(point)),
+                          button, buttons, modifiers);
+        QApplication::sendEvent(table->viewport(), &event);
+    };
+    const QPoint first = table->visualRect(table->model()->index(0, 0)).center();
+    const QPoint fifth = table->visualRect(table->model()->index(4, 0)).center();
+    mouse(QEvent::MouseButtonPress, first, Qt::LeftButton, Qt::LeftButton);
+    require(!table->dragEnabled(), "fresh row gesture selects instead of exporting");
+    mouse(QEvent::MouseMove, fifth, Qt::NoButton, Qt::LeftButton);
+    mouse(QEvent::MouseButtonRelease, fifth, Qt::LeftButton, Qt::NoButton);
+    require(table->selectionModel()->selectedRows().size() == 5, "drag selects row range");
+    QApplication::processEvents();
+    const QImage painted = table->viewport()->grab().toImage();
+    const QRect selectedRect = table->visualRect(table->model()->index(0, 1));
+    const QRect plainRect = table->visualRect(table->model()->index(6, 1));
+    const QColor selectedPixel = painted.pixelColor(selectedRect.left() + 12, selectedRect.center().y());
+    const QColor plainPixel = painted.pixelColor(plainRect.left() + 12, plainRect.center().y());
+    require(selectedPixel == app.palette().color(QPalette::Highlight) && selectedPixel != plainPixel,
+            "selected rows visibly render the theme accent background");
+    mouse(QEvent::MouseButtonPress, first, Qt::LeftButton, Qt::LeftButton);
+    require(table->dragEnabled(), "normal drag exports an existing selection");
+    require(table->selectionModel()->selectedRows().size() == 5, "export press preserves selected range");
+    mouse(QEvent::MouseButtonRelease, first, Qt::LeftButton, Qt::NoButton);
+    mouse(QEvent::MouseButtonPress, first, Qt::LeftButton, Qt::LeftButton, Qt::AltModifier);
+    require(table->dragEnabled(), "Alt-drag enables export of existing selection");
+    mouse(QEvent::MouseButtonRelease, first, Qt::LeftButton, Qt::NoButton, Qt::AltModifier);
     const QSet<QString> expected{"Project", "Project/nested", "Project/nested/empty",
         "Project/nested/note.txt", "Project/.hidden", "loose.txt"};
     for (auto format : {WriteFormat::Zip, WriteFormat::SevenZip, WriteFormat::Tar,
